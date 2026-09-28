@@ -3,7 +3,7 @@
 import { writeFileSync } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
-import { Api, KnownProvider, Model } from "../src/types.js";
+import { Api, KnownProvider, Model, OpenAICompletionsCompat } from "../src/types.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -482,6 +482,7 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 				const npm = m.provider?.npm;
 				let api: Api;
 				let baseUrl: string;
+				let compat: OpenAICompletionsCompat | undefined;
 
 				if (npm === "@ai-sdk/openai") {
 					api = "openai-responses";
@@ -499,6 +500,30 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					baseUrl = `${variant.basePath}/v1`;
 				}
 
+				// Ported from upstream pi-mono: fix known mismatches between models.dev
+				// npm data and actual OpenCode Go endpoint behaviour. MiniMax M2.7 rejects
+				// Anthropic SDK auth and Qwen 3.5/3.6 are served via /v1/chat/completions.
+				if (variant.provider === "opencode-go") {
+					if (modelId === "minimax-m2.7") {
+						api = "openai-completions";
+						baseUrl = `${variant.basePath}/v1`;
+					}
+					if (modelId === "qwen3.5-plus" || modelId === "qwen3.6-plus") {
+						api = "openai-completions";
+						baseUrl = `${variant.basePath}/v1`;
+						compat = { thinkingFormat: "qwen" };
+					}
+				}
+
+				// OpenCode Kimi K2.6 rejects reasoning_effort.
+				if (modelId === "kimi-k2.6") {
+					compat = { ...(compat ?? {}), supportsReasoningEffort: false };
+				}
+
+				if (api === "openai-completions") {
+					compat = { ...(compat ?? {}), maxTokensField: "max_tokens" };
+				}
+
 				models.push({
 					id: modelId,
 					name: m.name || modelId,
@@ -513,6 +538,7 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 						cacheRead: m.cost?.cache_read || 0,
 						cacheWrite: m.cost?.cache_write || 0,
 					},
+					...(compat ? { compat } : {}),
 					contextWindow: m.limit?.context || 4096,
 					maxTokens: m.limit?.output || 4096,
 				});
@@ -603,8 +629,10 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 		}
 
 		// Process Kimi For Coding models
-		if (data["kimi-for-coding"]?.models) {
-			for (const [modelId, model] of Object.entries(data["kimi-for-coding"].models)) {
+		// models.dev renamed "kimi-for-coding" to "kimi-code-plan-global".
+		const kimiCodingData = data["kimi-code-plan-global"] ?? data["kimi-for-coding"];
+		if (kimiCodingData?.models) {
+			for (const [modelId, model] of Object.entries(kimiCodingData.models)) {
 				const m = model as ModelsDevModel;
 				if (m.tool_call !== true) continue;
 
